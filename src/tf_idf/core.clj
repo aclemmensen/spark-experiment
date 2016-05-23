@@ -6,6 +6,47 @@
             [sparkling.destructuring :as s-de])
   (:gen-class))
 
+(def c (-> (conf/spark-conf) (conf/master "local") (conf/app-name "wat")))
+(def sc (spark/spark-context c))
+
+(defn sbuild-tuple [line]
+  (let [[id content] (string/split line #":" 2)]
+    (spark/tuple id content)))
+
+(defn do-search [content pattern]
+  (not= (re-find pattern content) nil))
+
+(defn xsearch [source pattern]
+  (->> source
+       (spark/map-to-pair sbuild-tuple)
+       (spark/filter (s-de/fn [(id content)] (do-search content pattern)))
+       (spark/map (s-de/fn [(id content)] id))
+       spark/collect))
+
+;(def easy (spark/text-file sc "/temp/sites/63599.html"))
+(def site (spark/text-file sc "/temp/sites/277097.html"))
+;(def site-cp (spark/text-file sc "/temp/sites/1.html.gz"))
+
+(defn try-take [source]
+  (->> source
+       ;(spark/map-to-pair build-tuple)
+       ;(spark/map-to-pair (fn [line] (let [[id content] (string/split line #":" 2)] (spark/tuple id content))))
+       (spark/filter (fn [line] (not= line nil)))
+       (spark/map (fn [line] (let [[id _] (string/split line #":" 2)] id)))
+       spark/collect))
+
+;(spark/collect easy)
+
+(try-take site)
+(xsearch site-cp #"yoga")
+
+;(build-tuple "999999999999:hello")
+
+;(->> (spark/text-file sc "/temp/sites/63599.html")
+;     (spark/map count)
+;     spark/collect
+;     )
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Basic term handling functions
