@@ -1,14 +1,20 @@
 (ns tf-idf.core
   (:require [clojure.string :as string]
+            [clojure.set :as cset]
             [sparkling.conf :as conf]
             [sparkling.core :as spark]
             [sparkling.serialization]
             [sparkling.destructuring :as s-de])
   (:gen-class))
 
+(defn make-spark-config []
+  (-> 
+    (conf/spark-conf)
+    (conf/master "local[*]")
+    (conf/app-name "wat")))
+
 (defn make-spark-context []
-  (let [c (-> (conf/spark-conf) (conf/master "local[*]") (conf/app-name "wat"))]
-    (spark/spark-context c)))
+    (spark/spark-context (make-spark-config)))
 
 (defn build-tuple [line]
   (let [[id content] (string/split line #":" 2)]
@@ -22,12 +28,16 @@
 ;(defn do-search [content pattern]
 ;  (not= (re-find pattern content) nil))
 
+(defn collect-set [source]
+  (->> source
+       spark/collect
+       (into #{})))
+
 (defn search [source pattern]
   (->> source
-       ;(spark/map-to-pair build-tuple)
        (spark/filter (s-de/fn [(id content)] (do-search content pattern)))
        (spark/map (s-de/fn [(id content)] id))
-       spark/collect))
+       collect-set))
 
 (defn path-for [site] 
   (let [shard (rem site 10)]
@@ -42,11 +52,15 @@
        (map (fn [file] (.getAbsolutePath file)))
        sort))
 
-(defn build-rrd [sc files] do
-  (->> files
-       (map #(spark/text-file sc %1))
-       (reduce spark/union)
+(defn build-rdd [sc file] do
+  (->> file
+       (spark/text-file sc)
        (spark/map-to-pair build-tuple)))
+
+(defn build-rrds [sc files] do
+  (->> files
+       (map #(build-rdd sc %1))
+       (reduce spark/union)))
 
 (defn filter-rrds [raw changed]
   (->> (spark/cogroup raw changed)
@@ -55,45 +69,36 @@
                              (last new-contents)
                              (first contents))))))
 
-(defn build-site-rrd [sc site] do
-  (let [raw-files (files-for site ".html")
-        raw-rrd (build-rrd sc raw-files)
-        changed-files (files-for site ".html-changed")]
-    (if (= (count changed-files) 0)
-      raw-rrd
-      (filter-rrds raw-rrd (spark/cache (build-rrd sc changed-files))))))
+;;(defn build-site-rrd [sc site] do
+;;  (let [raw-files (files-for site ".html")
+;;        raw-rrd (build-rrds sc raw-files)
+;;        changed-files (files-for site ".html-changed")]
+;;    (if (= (count changed-files) 0)
+;;      raw-rrd
+;;      (filter-rrds raw-rrd (build-rrds sc changed-files)))))
 
 (defn get-ids [rrd] do
   (->> rrd
        (spark/map (s-de/fn [(id content)] id))
-       spark/collect))
+       collect-set))
 
-;(def easy (spark/text-file sc "/storage/si-policy/pages/9/site-63599/1.html.gz"))
-;(def site (spark/text-file sc "/temp/sites/277097.html"))
-;(def site-cp (spark/text-file sc "/temp/sites/1.html.gz"))
-;(def full (build-rrds 63599))
-;(def dtu (build-rrds 277097))
-
-(defn try-take [source]
-  (->> source
-       ;(spark/map-to-pair build-tuple)
-       ;(spark/map-to-pair (fn [line] (let [[id content] (string/split line #":" 2)] (spark/tuple id content))))
-       (spark/filter (fn [line] (not= line nil)))
-       (spark/map (fn [line] (let [[id _] (string/split line #":" 2)] id)))
-       spark/collect))
-
-;(spark/collect (build-rrds 63599))
-
-;(try-take easy)
-
-;(build-tuple "999999999999:hello")
-
-;(->> (spark/text-file sc "/temp/sites/63599.html")
-;     (spark/map count)
-;     spark/collect
-;     )
+(defn do-site-search [sc site pattern]
+  (let [raw-rrd (build-rrds sc (files-for site ".html"))
+        cng-rrd (spark/cache (build-rrds sc (files-for site ".html-changed")))
+        raw (search raw-rrd pattern)
+        cng (search cng-rrd pattern)
+        ids (into #{} (get-ids cng-rrd))]
+    (->> cng                    ;; take resulting changed pages
+         (cset/difference ids)  ;; remove those from the list of all changed pages
+         (cset/difference raw)  ;; then remove that set from the raw results
+         (cset/union cng))))    ;; union changed + (raw - ignored) together
+(comment
+  (def sc (make-spark-context))
+  (def sl (build-site-rrd sc 58278))
+  (def dt (build-site-rrd sc 2770977))
+  (count (do-site-search sc 58278 #"pasning")))
 
 (defn -main [& args]
   (let [sc (make-spark-context)]
-    (search (build-site-rrd sc 277097) #"yoga")))
+    (do-site-search sc 2770977 #"yoga")))
 
