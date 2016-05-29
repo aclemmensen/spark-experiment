@@ -10,7 +10,7 @@
   (let [c (-> (conf/spark-conf) (conf/master "local[*]") (conf/app-name "wat"))]
     (spark/spark-context c)))
 
-(defn sbuild-tuple [line]
+(defn build-tuple [line]
   (let [[id content] (string/split line #":" 2)]
     (spark/tuple id content)))
 
@@ -22,26 +22,51 @@
 ;(defn do-search [content pattern]
 ;  (not= (re-find pattern content) nil))
 
-(defn xsearch [source pattern]
+(defn search [source pattern]
   (->> source
-       (spark/map-to-pair sbuild-tuple)
+       ;(spark/map-to-pair build-tuple)
        (spark/filter (s-de/fn [(id content)] (do-search content pattern)))
        (spark/map (s-de/fn [(id content)] id))
        spark/collect))
 
-(defn find-files [site]
-  (let [shard (rem site 10)
-        dir (clojure.java.io/file (str "/storage/si-policy/pages/" shard "/site-" site))
-        files (file-seq dir)]
-    (->> files
-         (filter (fn [file] (.endsWith (.getName file) ".html.gz")))
-         (map (fn [file] (.getAbsolutePath file))))))
+(defn path-for [site] 
+  (let [shard (rem site 10)]
+    (str "/storage/si-policy/pages/" shard "/site-" site)))
 
-(defn build-rrds [sc site] do
+(defn files-for [site pattern]
   (->> site
-       find-files
+       path-for
+       clojure.java.io/file
+       file-seq
+       (filter (fn [file] (.endsWith (.getName file) pattern)))
+       (map (fn [file] (.getAbsolutePath file)))
+       sort))
+
+(defn build-rrd [sc files] do
+  (->> files
        (map #(spark/text-file sc %1))
-       (reduce spark/union)))
+       (reduce spark/union)
+       (spark/map-to-pair build-tuple)))
+
+(defn filter-rrds [raw changed]
+  (->> (spark/cogroup raw changed)
+       (spark/map-values (s-de/fn [(-contents -new-contents)]
+                           (if (> (count new-contents) 0)
+                             (last new-contents)
+                             (first contents))))))
+
+(defn build-site-rrd [sc site] do
+  (let [raw-files (files-for site ".html")
+        raw-rrd (build-rrd sc raw-files)
+        changed-files (files-for site ".html-changed")]
+    (if (= (count changed-files) 0)
+      raw-rrd
+      (filter-rrds raw-rrd (spark/cache (build-rrd sc changed-files))))))
+
+(defn get-ids [rrd] do
+  (->> rrd
+       (spark/map (s-de/fn [(id content)] id))
+       spark/collect))
 
 ;(def easy (spark/text-file sc "/storage/si-policy/pages/9/site-63599/1.html.gz"))
 ;(def site (spark/text-file sc "/temp/sites/277097.html"))
@@ -70,5 +95,5 @@
 
 (defn -main [& args]
   (let [sc (make-spark-context)]
-    (xsearch (build-rrds sc 277097) #"yoga")))
+    (search (build-site-rrd sc 277097) #"yoga")))
 
