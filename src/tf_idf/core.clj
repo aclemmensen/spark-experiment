@@ -6,15 +6,21 @@
             [sparkling.destructuring :as s-de])
   (:gen-class))
 
-(def c (-> (conf/spark-conf) (conf/master "local") (conf/app-name "wat")))
-(def sc (spark/spark-context c))
+(defn make-spark-context []
+  (let [c (-> (conf/spark-conf) (conf/master "local[*]") (conf/app-name "wat"))]
+    (spark/spark-context c)))
 
 (defn sbuild-tuple [line]
   (let [[id content] (string/split line #":" 2)]
     (spark/tuple id content)))
 
 (defn do-search [content pattern]
-  (not= (re-find pattern content) nil))
+  (and 
+    (not= content nil)
+    (not= (re-find pattern content) nil)))
+
+;(defn do-search [content pattern]
+;  (not= (re-find pattern content) nil))
 
 (defn xsearch [source pattern]
   (->> source
@@ -23,9 +29,25 @@
        (spark/map (s-de/fn [(id content)] id))
        spark/collect))
 
-;(def easy (spark/text-file sc "/temp/sites/63599.html"))
-(def site (spark/text-file sc "/temp/sites/277097.html"))
+(defn find-files [site]
+  (let [shard (rem site 10)
+        dir (clojure.java.io/file (str "/storage/si-policy/pages/" shard "/site-" site))
+        files (file-seq dir)]
+    (->> files
+         (filter (fn [file] (.endsWith (.getName file) ".html.gz")))
+         (map (fn [file] (.getAbsolutePath file))))))
+
+(defn build-rrds [sc site] do
+  (->> site
+       find-files
+       (map #(spark/text-file sc %1))
+       (reduce spark/union)))
+
+;(def easy (spark/text-file sc "/storage/si-policy/pages/9/site-63599/1.html.gz"))
+;(def site (spark/text-file sc "/temp/sites/277097.html"))
 ;(def site-cp (spark/text-file sc "/temp/sites/1.html.gz"))
+;(def full (build-rrds 63599))
+;(def dtu (build-rrds 277097))
 
 (defn try-take [source]
   (->> source
@@ -35,10 +57,9 @@
        (spark/map (fn [line] (let [[id _] (string/split line #":" 2)] id)))
        spark/collect))
 
-;(spark/collect easy)
+;(spark/collect (build-rrds 63599))
 
-(try-take site)
-(xsearch site-cp #"yoga")
+;(try-take easy)
 
 ;(build-tuple "999999999999:hello")
 
@@ -78,11 +99,11 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Basic Spark management
 
-(defn make-spark-context []
-  (let [c (-> (conf/spark-conf)
-              (conf/master "local[*]")
-              (conf/app-name "tfidf"))]
-    (spark/spark-context c)))
+;(defn make-spark-context []
+;  (let [c (-> (conf/spark-conf)
+;              (conf/master "local[*]")
+;              (conf/app-name "tfidf"))]
+;    (spark/spark-context c)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -157,14 +178,6 @@
 
 
 (defn -main [& args]
-  (let [sc (make-spark-context)
-        documents [(spark/tuple :doc1 "Four score and seven years ago our fathers brought forth on this continent a new nation")
-                   (spark/tuple :doc2 "conceived in Liberty and dedicated to the proposition that all men are created equal")
-                   (spark/tuple :doc3 "Now we are engaged in a great civil war testing whether that nation or any nation so")
-                   (spark/tuple :doc4 "conceived and so dedicated can long endure We are met on a great battlefield of that war")]
-        corpus (spark/parallelize-pairs sc documents)
-        tf-idf (tf-idf corpus)]
-    (println (.toDebugString tf-idf))
-    (clojure.pprint/pprint (spark/collect tf-idf))
-    #_(clojure.pprint/pprint (spark/take 10 (sort-by-value tf-idf)))
-    ))
+  (let [sc (make-spark-context)]
+    (xsearch (build-rrds sc 277097) #"yoga")))
+
